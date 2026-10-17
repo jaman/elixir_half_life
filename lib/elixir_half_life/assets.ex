@@ -14,6 +14,7 @@ defmodule ElixirHalfLife.Assets do
   processes ask for it at the same time.
   """
 
+  alias Cauldron2D.Drafter.Launcher
   alias Cauldron3D.Formats.{Bsp, Entities, Files, Spr, Studio, Wad3, Wav}
   alias Cauldron3D.Texture
 
@@ -24,6 +25,40 @@ defmodule ElixirHalfLife.Assets do
     {{-32.0, -32.0, -32.0}, {32.0, 32.0, 32.0}},
     {{-16.0, -16.0, -18.0}, {16.0, 16.0, 18.0}}
   ]
+
+  @doc "`:ok` when `path` is a Half-Life install `load/2` can read, else `{:error, text}` for a person to read."
+  @spec check_install(Path.t()) :: :ok | {:error, String.t()}
+  def check_install(path) do
+    case installed(path) do
+      :ok ->
+        :ok
+
+      {:error, {:no_half_life, absent}} ->
+        {:error, "not a Half-Life install: no valve/#{Enum.join(absent, ", valve/")}"}
+
+      {:error, _reason} ->
+        {:error, "not a Half-Life install (looking for its valve folder)"}
+    end
+  end
+
+  @doc "`:ok` when `path` holds FreeHL's `package_valve.pk3` or its unpacked files, else `{:error, text}`."
+  @spec check_freehl(Path.t()) :: :ok | {:error, String.t()}
+  def check_freehl(path) do
+    with {:ok, files} <- Files.open(path, within: "valve"),
+         true <- Files.exists?(files, "progs.dat") do
+      :ok
+    else
+      _other -> {:error, "no FreeHL here (looking for package_valve.pk3)"}
+    end
+  end
+
+  @doc "A Half-Life install in Steam's usual places that `check_install/1` accepts, or `nil`."
+  @spec discover_install() :: Path.t() | nil
+  def discover_install do
+    "Half-Life"
+    |> Launcher.steam_folders()
+    |> Enum.find(&(check_install(&1) == :ok))
+  end
 
   @doc """
   Open the game files, read every wall texture in the install's WAD3 collections, and

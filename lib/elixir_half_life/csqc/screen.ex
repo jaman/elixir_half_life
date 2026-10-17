@@ -22,6 +22,11 @@ defmodule ElixirHalfLife.Csqc.Screen do
   `{x0, y0, x1, y1}`.
   Colours are tinted by `rgb` (each 0.0 to 1.0) and laid over by `alpha`, or added when
   the draw flag's low bits are 1.
+
+  A pixel's alpha is how much of what lies under the screen it hides, its colour already
+  multiplied by that: laying over by `k` raises alpha `a` to `255 - (255 - a) * (1 - k)`,
+  a cut-out sprite texel makes it 255, adding leaves it. A screen begun black has alpha
+  255 everywhere and keeps it; `clear/2` makes a box see-through.
   """
 
   import Bitwise
@@ -51,6 +56,21 @@ defmodule ElixirHalfLife.Csqc.Screen do
     }
 
     %{s | ext: Map.put(s.ext, :screen, screen)}
+  end
+
+  @doc "The screen with the pixel box `{x, y, w, h}` made see-through: colour and alpha 0."
+  @spec clear(map(), {number(), number(), number(), number()}) :: map()
+  def clear(s, {x, y, w, h}) do
+    %{width: width, height: height} = s.ext.screen
+    {x0, y0} = {clamp(trunc(x), width), clamp(trunc(y), height)}
+    {x1, y1} = {clamp(trunc(x + w), width), clamp(trunc(y + h), height)}
+
+    if x1 <= x0 or y1 <= y0,
+      do: s,
+      else:
+        rows(s, y0, y1, fn row, _y ->
+          splice(row, x0, x1, :binary.copy(<<0, 0, 0, 0>>, x1 - x0))
+        end)
   end
 
   @doc "The screen's size in 2D units, `{width, height}`, or `nil` before `begin/4`."
@@ -380,9 +400,9 @@ defmodule ElixirHalfLife.Csqc.Screen do
   defp over_pixel(under, over, tint, alpha, {:sprite, 1}),
     do: over_pixel(under, over, tint, alpha, 1)
 
-  defp over_pixel(<<_, _, _, ua>> = under, <<r, g, b, a>>, {tr, tg, tb}, alpha, {:sprite, _}) do
+  defp over_pixel(under, <<r, g, b, a>>, {tr, tg, tb}, alpha, {:sprite, _}) do
     if alpha * a / 255 >= 0.5,
-      do: <<channel(r * tr), channel(g * tg), channel(b * tb), ua>>,
+      do: <<channel(r * tr), channel(g * tg), channel(b * tb), 255>>,
       else: under
   end
 
@@ -404,11 +424,11 @@ defmodule ElixirHalfLife.Csqc.Screen do
         under
 
       k >= 1 ->
-        <<channel(r * tr), channel(g * tg), channel(b * tb), ua>>
+        <<channel(r * tr), channel(g * tg), channel(b * tb), 255>>
 
       true ->
         <<channel(r * tr * k + ur * (1 - k)), channel(g * tg * k + ug * (1 - k)),
-          channel(b * tb * k + ub * (1 - k)), ua>>
+          channel(b * tb * k + ub * (1 - k)), covered(ua, k)>>
     end
   end
 
@@ -467,8 +487,8 @@ defmodule ElixirHalfLife.Csqc.Screen do
   defp mixed(under, <<_, _, _, a>> = over, alpha, {:sprite, 1}),
     do: added(under, over, alpha * a / 255)
 
-  defp mixed(<<_, _, _, ua>> = under, <<r, g, b, a>>, alpha, {:sprite, _}) do
-    if alpha * a / 255 >= 0.5, do: <<r, g, b, ua>>, else: under
+  defp mixed(under, <<r, g, b, a>>, alpha, {:sprite, _}) do
+    if alpha * a / 255 >= 0.5, do: <<r, g, b, 255>>, else: under
   end
 
   defp mixed(under, <<_, _, _, a>> = over, alpha, 1), do: added(under, over, alpha * a / 255)
@@ -478,14 +498,14 @@ defmodule ElixirHalfLife.Csqc.Screen do
 
     cond do
       k >= 1 ->
-        <<r, g, b, ua>>
+        <<r, g, b, 255>>
 
       k <= 0 ->
         under
 
       true ->
         <<channel(r * k + ur * (1 - k)), channel(g * k + ug * (1 - k)),
-          channel(b * k + ub * (1 - k)), ua>>
+          channel(b * k + ub * (1 - k)), covered(ua, k)>>
     end
   end
 
@@ -530,6 +550,8 @@ defmodule ElixirHalfLife.Csqc.Screen do
     do: %{s | ext: Map.update(s.ext, :screen, %{key => value}, &Map.put(&1, key, value))}
 
   defp clamp(value, limit), do: value |> max(0) |> min(limit)
+
+  defp covered(under_alpha, k), do: channel(255 - (255 - under_alpha) * (1 - k) + 0.5)
 
   defp channel(value) when value >= 255, do: 255
   defp channel(value) when value <= 0, do: 0

@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## [0.2.0]
+
+### Added
+
+- The game is drawn by the graphics card (`ElixirHalfLife.Gpu`) where there is one: in
+  the terminal pane by default, or in a window of its own. The picture options
+  `software`, `gpu` and `window` choose for one run.
+- A setup page before the game starts (`Cauldron2D.Drafter.Launcher`) that finds a
+  Half-Life install in Steam's usual places, CrossOver's included, and checks it and
+  FreeHL's files.
+
+## [0.1.0]
 
 ### Changed
 
@@ -18,7 +29,6 @@
 ### Added
 
 - `--mute` (or `CAULDRON_MUTE=1`): no sound.
-
 
 ### Changed
 
@@ -206,3 +216,4 @@ A level is joined as FTE's client joins one: `changing` stops every sound channe
 - Input is turned into a command once per client frame, as FTE's client does; the game no
   longer waits on a frame being drawn.
 - Light styles reach the client program, so lights flicker, pulse and switch as set.
+

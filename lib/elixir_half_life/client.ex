@@ -6,7 +6,9 @@ defmodule ElixirHalfLife.Client do
       mix half_life --dir "/games/Half-Life" --freehl /games/freehl
 
   The whole pane is FreeHL's client program's own frame (`ElixirHalfLife.ClientProgram`),
-  drawn at the pane's size: the world, the entities it chooses, and its HUD.
+  drawn at the pane's size: the world, the entities it chooses, and its HUD. A scene in
+  play also describes itself for a graphics card (`:gpu`, `ElixirHalfLife.Gpu`), drawn
+  so when the picture options ask for `gpu` or `window`.
 
   ## Keys
 
@@ -57,6 +59,7 @@ defmodule ElixirHalfLife.Client do
     ClientProgram,
     EightBitSound,
     Game,
+    Gpu,
     MediaSound,
     Menu,
     Options
@@ -291,6 +294,17 @@ defmodule ElixirHalfLife.Client do
   def scene(view, look) do
     overlay = overlay(Map.get(look, :menu))
 
+    view
+    |> picture_scene(overlay)
+    |> put_gpu(view, overlay)
+  end
+
+  defp put_gpu(scene, %{program: program}, overlay) when is_pid(program),
+    do: Map.put(scene, :gpu, Gpu.scene(program, overlay))
+
+  defp put_gpu(scene, _view, _overlay), do: scene
+
+  defp picture_scene(view, overlay) do
     %{
       focus: {0.0, 0.0},
       bounds: :unbounded,

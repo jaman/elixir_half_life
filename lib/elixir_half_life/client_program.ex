@@ -158,6 +158,32 @@ defmodule ElixirHalfLife.ClientProgram do
   def picture(pid, size, aspect, overlay \\ nil),
     do: GenServer.call(pid, {:picture, size, aspect, overlay}, :infinity)
 
+  @doc """
+  A frame of `{width, height}` for a graphics card to draw: the same frame as
+  `picture/4` runs, with the scene described rather than drawn
+  (`ElixirHalfLife.Csqc.Described`). Returns `%{overlay:, scene:}`: `overlay` the 2D
+  layer as a `Cauldron3D.Frame` at the size the program drew at (at most `:width`
+  across), its colours multiplied by its alpha, see-through where the scene shows,
+  with `overlay` drawn over it, not put through the gamma ramp; `gamma` the ramp's
+  console variables `{gamma, contrast, brightness}` and `tone` the ramp
+  (`ElixirHalfLife.Gamma.table/3`); `scene` the frame's last
+  scene description, or `nil` when the frame drew none (the level is loading, or the
+  client has disconnected), when the scene last described still stands.
+  """
+  @spec gpu_picture(
+          pid(),
+          {pos_integer(), pos_integer()},
+          number(),
+          (Cauldron3D.Frame.t() -> Cauldron3D.Frame.t()) | nil
+        ) :: %{
+          overlay: Cauldron3D.Frame.t(),
+          scene: map() | nil,
+          gamma: {number(), number(), number()},
+          tone: Gamma.table()
+        }
+  def gpu_picture(pid, size, aspect, overlay \\ nil),
+    do: GenServer.call(pid, {:gpu_picture, size, aspect, overlay}, :infinity)
+
   @impl true
   def init(opts) do
     runner = Keyword.fetch!(opts, :runner)
@@ -192,6 +218,7 @@ defmodule ElixirHalfLife.ClientProgram do
        shared: :ets.new(__MODULE__, [:set, :public]),
        drawn: nil,
        scene: nil,
+       layer: nil,
        tone: nil,
        ended: nil
      }}
@@ -224,16 +251,15 @@ defmodule ElixirHalfLife.ClientProgram do
   def handle_call(:sounds, _from, state), do: {:reply, state.sounds, state}
   def handle_call(:shared, _from, state), do: {:reply, state.shared, state}
 
-  def handle_call({:picture, size, _aspect, overlay}, _from, %{ended: reason} = state)
-      when is_binary(reason),
-      do: disconnected_picture(size, overlay, state)
+  def handle_call({:picture, {width, height} = size, aspect, overlay}, _from, state) do
+    {frame, _scene, state} = frame(:software, size, aspect, overlay, state)
+    {:reply, scaled(frame, width, height).pixels, state}
+  end
 
-  def handle_call({:picture, size, aspect, overlay}, _from, state) do
-    state = loading_timeout(state)
-
-    if state.loading || state.csqc == nil,
-      do: loading_picture(size, aspect, overlay, state),
-      else: view_picture(size, aspect, overlay, state)
+  def handle_call({:gpu_picture, size, aspect, overlay}, _from, state) do
+    {frame, scene, state} = frame(:gpu, size, aspect, overlay, state)
+    tone = state.tone || gamma(state.csqc)
+    {:reply, %{overlay: frame, scene: scene, gamma: ramp(state.csqc), tone: tone}, state}
   end
 
   @impl true
@@ -386,7 +412,18 @@ defmodule ElixirHalfLife.ClientProgram do
 
   defp loading_timeout(state), do: state
 
-  defp loading_picture({width, height}, aspect, overlay, state) do
+  defp frame(_mode, size, _aspect, overlay, %{ended: reason} = state) when is_binary(reason),
+    do: disconnected_frame(size, overlay, state)
+
+  defp frame(mode, size, aspect, overlay, state) do
+    state = loading_timeout(state)
+
+    if state.loading || state.csqc == nil,
+      do: loading_frame(mode, size, aspect, overlay, state),
+      else: view_frame(mode, size, aspect, overlay, state)
+  end
+
+  defp loading_frame(mode, size, aspect, overlay, state) do
     now = System.monotonic_time(:microsecond)
 
     state =
@@ -394,49 +431,78 @@ defmodule ElixirHalfLife.ClientProgram do
         do: send_input(state, frametime(state, now)),
         else: state
 
-    {drawn_width, drawn_height} = fit({width, height}, state.width)
+    {drawn_width, drawn_height} = drawn = fit(size, state.width)
     virtual = VirtualSize.size(state.csqc || state.menu, drawn_width, drawn_height, aspect)
-    {frame, state} = plaque(state, {drawn_width, drawn_height}, virtual, aspect, now)
-    frame = finish(frame, overlay, state.tone || gamma(state.csqc))
-    {:reply, scaled(frame, width, height).pixels, %{state | last: now, drawn: frame}}
+    {frame, scene, state} = plaque(mode, state, drawn, virtual, aspect, now)
+    frame = finish(frame, overlay, layered(mode, state.tone || gamma(state.csqc)))
+    {frame, scene, %{state | last: now, drawn: frame}}
   end
 
-  defp plaque(%{plaque: :begin} = state, {width, height}, virtual, aspect, now) do
-    {view, state} = plaque_view(state, {width, height}, aspect, now)
+  defp plaque(mode, %{plaque: :begin} = state, {width, height}, virtual, aspect, now) do
+    {view, scene, state} = plaque_view(mode, state, {width, height}, aspect, now)
     {frame, menu} = LoadingScreen.beginning(state.menu, view, width, height, virtual)
-    {frame, %{state | menu: menu, plaque: {:frozen, frame}}}
+    {frame, scene, %{state | menu: menu, plaque: {:frozen, frame}}}
   end
 
   defp plaque(
+         _mode,
          %{plaque: {:frozen, %{width: width, height: height} = frame}} = state,
          {width, height},
          _virtual,
          _aspect,
          _now
        ),
-       do: {frame, state}
+       do: {frame, nil, state}
 
-  defp plaque(%{plaque: {:frozen, frame}} = state, {width, height}, _virtual, _aspect, _now),
-    do: {Cauldron3D.Frame.scale(frame, width, height), state}
+  defp plaque(
+         _mode,
+         %{plaque: {:frozen, frame}} = state,
+         {width, height},
+         _virtual,
+         _aspect,
+         _now
+       ),
+       do: {Cauldron3D.Frame.scale(frame, width, height), nil, state}
 
   defp kept_plaque({:frozen, _frame} = plaque), do: plaque
   defp kept_plaque(_plaque), do: :begin
 
-  defp plaque_view(%{csqc: nil} = state, size, _aspect, _now),
-    do: {last_scene(state, size), state}
+  defp plaque_view(mode, %{csqc: nil} = state, size, _aspect, _now),
+    do: {last_scene(mode, state, size), nil, state}
 
-  defp plaque_view(%{starting: true} = state, size, _aspect, _now),
-    do: {last_scene(state, size), state}
+  defp plaque_view(mode, %{starting: true} = state, size, _aspect, _now),
+    do: {last_scene(mode, state, size), nil, state}
 
-  defp plaque_view(state, {width, height}, aspect, now) do
-    csqc = %{state.csqc | ext: Map.put(state.csqc.ext, :aspect, aspect)}
+  defp plaque_view(mode, state, {width, height}, aspect, now) do
+    csqc = state.csqc |> put_ext(:aspect, aspect) |> drawing(mode)
     cltime = (now - state.started) / 1_000_000
     {frame, csqc} = Csqc.view(csqc, width, height, frametime(state, now), cltime)
-    {frame, %{state | csqc: csqc}}
+    {scene, csqc} = described(csqc, mode)
+    {frame, scene, %{state | csqc: csqc}}
   end
 
-  defp last_scene(%{scene: nil}, _size), do: nil
-  defp last_scene(%{scene: scene}, {width, height}), do: scaled(scene, width, height)
+  defp last_scene(:software, %{scene: nil}, _size), do: nil
+  defp last_scene(:software, %{scene: scene}, {width, height}), do: scaled(scene, width, height)
+  defp last_scene(:gpu, %{layer: nil}, _size), do: nil
+  defp last_scene(:gpu, %{layer: layer}, {width, height}), do: scaled(layer, width, height)
+
+  defp put_ext(csqc, key, value), do: %{csqc | ext: Map.put(csqc.ext, key, value)}
+
+  defp drawing(csqc, :gpu), do: csqc |> put_ext(:gpu, true) |> put_ext(:described, [])
+  defp drawing(csqc, :software), do: %{csqc | ext: Map.drop(csqc.ext, [:gpu, :described])}
+
+  defp described(csqc, :gpu) do
+    {described, ext} = Map.pop(csqc.ext, :described, [])
+    {List.last(described), %{csqc | ext: Map.delete(ext, :gpu)}}
+  end
+
+  defp described(csqc, :software), do: {nil, csqc}
+
+  defp keep_screen(state, :software, screen), do: %{state | scene: screen}
+  defp keep_screen(state, :gpu, screen), do: %{state | layer: screen}
+
+  defp layered(:software, tone), do: tone
+  defp layered(:gpu, _tone), do: Gamma.table(1.0, 1.0, 0.0)
 
   defp finish(frame, overlay, tone) do
     frame = if overlay, do: overlay.(frame), else: frame
@@ -452,6 +518,11 @@ defmodule ElixirHalfLife.ClientProgram do
         cvar(csqc, "contrast", 1.0),
         cvar(csqc, "brightness", 0.0)
       )
+
+  defp ramp(nil), do: {1.0, 1.0, 0.0}
+
+  defp ramp(csqc),
+    do: {cvar(csqc, "gamma", 1.0), cvar(csqc, "contrast", 1.0), cvar(csqc, "brightness", 0.0)}
 
   defp cvar(csqc, name, default),
     do: if(Server.cvar?(csqc, name), do: Server.cvar(csqc, name), else: default)
@@ -473,24 +544,26 @@ defmodule ElixirHalfLife.ClientProgram do
   defp scaled(%{width: width, height: height} = frame, width, height), do: frame
   defp scaled(frame, width, height), do: Cauldron3D.Frame.scale(frame, width, height)
 
-  defp view_picture({width, height}, aspect, overlay, state) do
+  defp view_frame(mode, size, aspect, overlay, state) do
     now = System.monotonic_time(:microsecond)
     seconds = frametime(state, now)
     state = send_input(state, seconds)
-    csqc = %{state.csqc | ext: Map.put(state.csqc.ext, :aspect, aspect)}
-    {drawn_width, drawn_height} = fit({width, height}, state.width)
+    csqc = state.csqc |> put_ext(:aspect, aspect) |> drawing(mode)
+    {drawn_width, drawn_height} = fit(size, state.width)
     cltime = (now - state.started) / 1_000_000
-    {scene, csqc} = Csqc.view(csqc, drawn_width, drawn_height, seconds, cltime)
+    {screen, csqc} = Csqc.view(csqc, drawn_width, drawn_height, seconds, cltime)
+    {scene, csqc} = described(csqc, mode)
     tone = gamma(csqc)
-    frame = finish(scene, overlay, tone)
+    frame = finish(screen, overlay, layered(mode, tone))
     :ets.insert(state.shared, {:sensitivity, Map.get(csqc.ext, :sensitivity, 1.0) / 1})
 
     state =
-      %{state | csqc: csqc, last: now, drawn: frame, scene: scene, tone: tone}
+      %{state | csqc: csqc, last: now, drawn: frame, tone: tone}
+      |> keep_screen(mode, screen)
       |> keep_sounds()
       |> send_requests()
 
-    {:reply, scaled(frame, width, height).pixels, state}
+    {frame, scene, state}
   end
 
   defp send_requests(state) do
@@ -588,7 +661,7 @@ defmodule ElixirHalfLife.ClientProgram do
     %{state | heard: state.heard + length(sounds)}
   end
 
-  defp disconnected_picture({width, height}, overlay, state) do
+  defp disconnected_frame({width, height}, overlay, state) do
     {drawn_width, drawn_height} = fit({width, height}, state.width)
     black = :binary.copy(<<0, 0, 0, 255>>, drawn_width * drawn_height)
 
@@ -599,7 +672,7 @@ defmodule ElixirHalfLife.ClientProgram do
         gamma(nil)
       )
 
-    {:reply, scaled(frame, width, height).pixels, %{state | drawn: frame}}
+    {frame, nil, %{state | drawn: frame}}
   end
 
   defp fit({width, height}, most) when width <= most, do: {width, height}

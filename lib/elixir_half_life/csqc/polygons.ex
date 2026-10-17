@@ -78,6 +78,47 @@ defmodule ElixirHalfLife.Csqc.Polygons do
   def flat(_polygon, frame), do: frame
 
   @doc """
+  As `flat/2`, onto a frame whose alpha is below 255 in places (its colours already
+  multiplied by it, as `ElixirHalfLife.Csqc.Screen` keeps them): an added polygon adds its
+  colour and leaves the alpha, a laid-over one raises the alpha by how much it covers.
+  """
+  @spec flat_over(map(), Cauldron3D.Frame.t()) :: Cauldron3D.Frame.t()
+  def flat_over(%{vertices: vertices} = polygon, frame) when length(vertices) >= 3 do
+    on_black = flat(polygon, backdrop(frame, 0))
+
+    pixels =
+      if Bitwise.band(trunc(polygon.flags), 3) == 1,
+        do: added(frame.pixels, on_black.pixels),
+        else: laid(frame.pixels, on_black.pixels, flat(polygon, backdrop(frame, 255)).pixels)
+
+    %{frame | pixels: pixels}
+  end
+
+  def flat_over(_polygon, frame), do: frame
+
+  defp backdrop(frame, level),
+    do: %{frame | pixels: :binary.copy(<<level, level, level, 255>>, frame.width * frame.height)}
+
+  defp added(under, drawn) do
+    for {<<ur, ug, ub, ua>>, <<r, g, b, _>>} <- Enum.zip(pixels(under), pixels(drawn)),
+        into: <<>>,
+        do: <<min(ur + r, 255), min(ug + g, 255), min(ub + b, 255), ua>>
+  end
+
+  defp laid(under, on_black, on_white) do
+    for {<<ur, ug, ub, ua>>, <<r, g, b, _>>, <<_, white, _, _>>} <-
+          Enum.zip([pixels(under), pixels(on_black), pixels(on_white)]),
+        into: <<>> do
+      cover = 255 - (white - g)
+
+      <<min(r + div(ur * (255 - cover), 255), 255), min(g + div(ug * (255 - cover), 255), 255),
+        min(b + div(ub * (255 - cover), 255), 255), 255 - div((255 - ua) * (255 - cover), 255)>>
+    end
+  end
+
+  defp pixels(binary), do: for(<<pixel::binary-4 <- binary>>, do: pixel)
+
+  @doc """
   Vertices widened into a strip `separation` either side of their line, facing `eye`:
   the line's vertices moved out one way with their `s` and `t` moved by `{ds, dt}`,
   copies moved the other way, joined two triangles to a step.

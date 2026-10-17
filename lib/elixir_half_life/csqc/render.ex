@@ -51,6 +51,7 @@ defmodule ElixirHalfLife.Csqc.Render do
 
   alias ElixirHalfLife.Csqc.{
     Animation,
+    Described,
     Lighting,
     Particles,
     Polygons,
@@ -74,12 +75,33 @@ defmodule ElixirHalfLife.Csqc.Render do
     end
   end
 
-  @doc "Draw the scene into its view's box on the screen."
+  @doc """
+  Draw the scene into its view's box on the screen; with the host's `ext.gpu` set,
+  describe it instead (`ElixirHalfLife.Csqc.Described.put/2`).
+  """
   @spec scene(map()) :: map()
   def scene(s) do
     s = Particles.advance(s)
+    gathered = gather(s)
+
+    if Map.get(s.ext, :gpu, false),
+      do: Described.put(s, gathered),
+      else: draw(s, gathered)
+  end
+
+  @doc """
+  What the scene shows now, as `scene/1` draws it: `%{view:, rect:, area:, fov:, world?:,
+  styles:, world_light:, weapon:, brushes:, others:, lights:, polygons:}`. `view` is the
+  `Cauldron3D.View`, `rect` its box on the screen in pixels, `fov` `{x, y}` in degrees;
+  `brushes` the brush entities and `others` the rest, each a snapshot (`snapshot/3`)
+  shown from the view's leaf, with `:weapon` the view's place and axes; `lights` the
+  dynamic lights as drawn; `polygons` the program's own polygons and the particles as
+  `{shader sort, polygon}`.
+  """
+  @spec gather(map()) :: map()
+  def gather(s) do
     scene = Scene.scene(s)
-    %{view: view, rect: {x, y, _w, _h}} = setup(s, scene.view)
+    %{view: view} = placed = setup(s, scene.view)
     styles = Lighting.styles(s)
     visible = visible_leaves(s, view, scene.view)
     weapon = {view.origin, {view.forward, Vec.scale(view.right, -1.0), view.up}}
@@ -90,45 +112,93 @@ defmodule ElixirHalfLife.Csqc.Render do
       |> Enum.map(&Map.put(&1, :weapon, weapon))
 
     {brushes, others} = Enum.split_with(things, &brush?(s, &1))
-    world_light = Lighting.world(styles)
+    made = Enum.flat_map(Enum.reverse(scene.polygons), &Polygons.scene(&1, view))
 
+    Map.merge(placed, %{
+      world?: QuakeC.float(Map.get(scene.view, 19, 1.0)) != 0,
+      styles: styles,
+      world_light: Lighting.world(styles),
+      weapon: weapon,
+      brushes: brushes,
+      others: others,
+      lights: rtlights(scene.lights, styles) ++ Particles.lights(s),
+      polygons: made ++ Particles.polygons(s, view)
+    })
+  end
+
+  defp draw(s, %{view: view, rect: {x, y, _w, _h}} = gathered) do
     world =
-      if QuakeC.float(Map.get(scene.view, 19, 1.0)) != 0,
+      if gathered.world?,
         do:
           Draw.polygons(s.bsp, view,
             surfaces: Map.fetch!(s.ext, :surfaces),
-            light: world_light,
+            light: gathered.world_light,
             skybox: skybox(s),
             time: s.time,
             liquid: &liquid/1,
-            models: Enum.map(brushes, &brush(s, &1, world_light)),
-            rtlights: rtlights(scene.lights, styles) ++ Particles.lights(s)
+            models: Enum.map(gathered.brushes, &brush_model(s, &1, gathered.world_light)),
+            rtlights: gathered.lights
           ),
         else: []
 
-    modelled = model_polygons(s, others, view, styles, weapon)
-    made = Enum.flat_map(Enum.reverse(scene.polygons), &Polygons.scene(&1, view))
-
-    particles = Particles.polygons(s, view)
+    modelled = model_polygons(s, gathered.others, view, gathered.styles, gathered.weapon)
 
     blended =
-      (Enum.map(made ++ particles, fn {sort, polygon} -> {{sort, 0}, polygon} end) ++ modelled)
-      |> Enum.with_index()
-      |> Enum.sort_by(fn {{key, _polygon}, index} -> {key, index} end)
-      |> Enum.map(fn {{_key, polygon}, _index} -> polygon end)
+      order(
+        Enum.map(gathered.polygons, fn {sort, polygon} -> {{sort, 0}, polygon} end) ++ modelled
+      )
 
     frame = Render.draw(view, world ++ blended, palette: @grey, background: {0, 0, 0})
     put_frame(s, Frame.blit(Screen.frame(s), frame, {trunc(x), trunc(y)}))
   end
 
+  @doc "Keyed polygons `{key, polygon}` in the order they are drawn: by key, then as given."
+  @spec order([{term(), Polygon.t()}]) :: [Polygon.t()]
+  def order(keyed) do
+    keyed
+    |> Enum.with_index()
+    |> Enum.sort_by(fn {{key, _polygon}, index} -> {key, index} end)
+    |> Enum.map(fn {{_key, polygon}, _index} -> polygon end)
+  end
+
+  @doc """
+  The sprites among `things` as `{{shader sort, 0}, polygon}`, as `scene/1` draws them
+  for `view`.
+  """
+  @spec sprite_polygons(map(), [map()], View.t(), tuple()) :: [{tuple(), Polygon.t()}]
+  def sprite_polygons(s, things, view, weapon) do
+    for thing <- things,
+        %{kind: :sprite, data: %Spr{} = sprite, name: name} <- [Models.get(s, thing.model)] do
+      {{sprite_sort(thing), 0}, dress(Sprites.polygon(thing, name, sprite, view, weapon), thing)}
+    end
+  end
+
+  @doc """
+  Each bone of `studio` posed for snapshot `thing`, in the model's own space (its place,
+  axes and scale left out): the program's skeleton when it set one, else the sequence,
+  frame, controllers, blends and base frame `scene/1` poses it by.
+  """
+  @spec studio_bones(Studio.t(), map()) :: tuple()
+  def studio_bones(studio, %{skeleton: nil} = thing),
+    do: Skeleton.pose(studio.parents, locals(studio, thing))
+
+  def studio_bones(_studio, %{skeleton: bones}), do: bones
+
+  @doc "Where snapshot `thing` stands: `{origin, {forward, left, up}}`, a held one placed by the view."
+  @spec placement(map()) :: {Vec.t(), {Vec.t(), Vec.t(), Vec.t()}}
+  def placement(thing), do: {placed_origin(thing), placed_axes(thing)}
+
   @doc """
   Where world point `point` falls on the screen in 2D units, as FTE's `project` gives it: `{x, y,
-  z}` with `z` `1 - 2 * near / depth`, negated when the point is behind the view.
+  z}` with `z` `1 - 2 * near / depth`, negated when the point is behind the view. A point
+  level with the view (depth 0, where FTE's division gives infinities) is taken at depth
+  `1.0e-30`, giving numbers of the same signs as large as a float holds.
   """
   @spec project(map(), Vec.t()) :: Vec.t()
   def project(s, point) do
     %{view: view, area: {x, y, w, h}, fov: {fov_x, fov_y}} = setup(s, Scene.scene(s).view)
     {right, up, depth} = View.to_camera(view, point)
+    depth = if depth == 0, do: 1.0e-30, else: depth
     ndc_x = right / (depth * :math.tan(fov_x * :math.pi() / 360))
     ndc_y = up / (depth * :math.tan(fov_y * :math.pi() / 360))
     z = (depth - 2 * view.near) / depth
@@ -164,7 +234,11 @@ defmodule ElixirHalfLife.Csqc.Render do
         {{x * rx, y * ry, z}, st, rgb, a}
       end)
 
-    drawn = Polygons.flat(%{polygon | vertices: vertices}, frame)
+    drawn =
+      if Map.get(s.ext, :gpu, false),
+        do: Polygons.flat_over(%{polygon | vertices: vertices}, frame),
+        else: Polygons.flat(%{polygon | vertices: vertices}, frame)
+
     put_frame(s, clipped(frame, drawn, s.ext.screen.clip))
   end
 
@@ -380,7 +454,14 @@ defmodule ElixirHalfLife.Csqc.Render do
     |> Enum.reject(fn %{colour: {r, g, b}} -> r < 0.001 and g < 0.001 and b < 0.001 end)
   end
 
-  defp brush(s, thing, world_light) do
+  @doc """
+  Brush entity `thing` as `Cauldron3D.Bsp.Draw` draws it: `%{model:, origin:, axes:,
+  scale:, tint:, blend:, depth:, alpha_test:, light:}`, `light` the world's light map,
+  fixed (`:fixed`) for draw flags 7 and scrolling (`:scroll`) for a glow modulation
+  green of 0.5.
+  """
+  @spec brush_model(map(), map(), map()) :: map()
+  def brush_model(s, thing, world_light) do
     %{name: "*" <> number} = Models.get(s, thing.model)
     {r, g, b} = thing.colormod || {1.0, 1.0, 1.0}
     {gr, gg, gb} = thing.glowmod
@@ -446,7 +527,12 @@ defmodule ElixirHalfLife.Csqc.Render do
     end)
   end
 
-  defp studio_polygons(s, studio, thing, view, styles) do
+  @doc """
+  Studio model `studio` of snapshot `thing` as `scene/1` draws it for `view`, lit by
+  light styles `styles`: world-space polygons (`Cauldron3D.Formats.Studio.polygons/3`).
+  """
+  @spec studio_polygons(map(), Studio.t(), map(), View.t(), map()) :: [Polygon.t()]
+  def studio_polygons(s, studio, thing, view, styles) do
     scale = thing.scale
     root = root(thing, scale)
 
@@ -479,9 +565,15 @@ defmodule ElixirHalfLife.Csqc.Render do
     )
   end
 
-  defp shell(_s, %{forceshader: 0}), do: nil
+  @doc """
+  The shell studio model snapshot `thing` is drawn as instead of its own skins (its
+  `forceshader` names a shader whose text maps a picture, `ElixirHalfLife.Csqc.Shaders`),
+  as `Cauldron3D.Formats.Studio.polygons/3` takes it, or `nil`.
+  """
+  @spec shell(map(), map()) :: map() | nil
+  def shell(_s, %{forceshader: 0}), do: nil
 
-  defp shell(s, thing) do
+  def shell(s, thing) do
     with name when is_binary(name) <- shader_name(s, thing.forceshader),
          text when is_binary(text) <- s.ext |> Map.get(:shader_texts, %{}) |> Map.get(name),
          %{map: map} = shader when is_binary(map) <- Shaders.read(text),
@@ -540,7 +632,9 @@ defmodule ElixirHalfLife.Csqc.Render do
   defp dress(%Polygon{} = polygon, thing),
     do: %{polygon | blend: blend(thing), depth: depth(thing)}
 
-  defp blend(thing) do
+  @doc "How snapshot `thing` is blended: `{:add, 1.0}`, `{:alpha, 1.0}` or `:none`."
+  @spec blend(map()) :: Polygon.blend()
+  def blend(thing) do
     cond do
       band(thing.effects, 32) != 0 or band(thing.flags, 8) != 0 -> {:add, 1.0}
       thing.translucent? -> {:alpha, 1.0}
@@ -548,7 +642,9 @@ defmodule ElixirHalfLife.Csqc.Render do
     end
   end
 
-  defp depth(thing) do
+  @doc "How snapshot `thing` is depth tested: `:always`, `:near_third` or `:test`."
+  @spec depth(map()) :: :always | :near_third | :test
+  def depth(thing) do
     cond do
       band(thing.effects, 8192) != 0 -> :always
       band(thing.flags, 1 ||| 4) != 0 -> :near_third

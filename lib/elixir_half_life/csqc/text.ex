@@ -12,7 +12,8 @@ defmodule ElixirHalfLife.Csqc.Text do
   Each character is a quad
   of its picture, sampled smoothly, coloured by the colour and alpha asked times the
   font's tint times the markup's colour, and laid over the screen with premultiplied
-  alpha, or added (draw flag 1). `drawtextfield` wraps text into a box, aligned by its
+  alpha (raising the screen's alpha as `ElixirHalfLife.Csqc.Screen` describes), or added
+  (draw flag 1). `drawtextfield` wraps text into a box, aligned by its
   flags: 1 left, 2 top, 4 right, 8 bottom, 16 on a dark plaque, 32 unwrapped.
 
   Drawing goes onto the rows of the host's `ext.screen` (`ElixirHalfLife.Csqc.Screen`),
@@ -693,7 +694,7 @@ defmodule ElixirHalfLife.Csqc.Text do
 
   defp blend({:straight, nil, _rect, {r, g, b, a}}, _x, _y, {dr, dg, db, da}, _additive) do
     <<out(r * a * 255 + dr * (1 - a)), out(g * a * 255 + dg * (1 - a)),
-      out(b * a * 255 + db * (1 - a)), da>>
+      out(b * a * 255 + db * (1 - a)), out(255 - (255 - da) * (1 - a))>>
   end
 
   defp blend({:fill, nil, _rect, {r, g, b, a}}, _x, _y, destination, additive),
@@ -708,7 +709,8 @@ defmodule ElixirHalfLife.Csqc.Text do
   end
 
   defp combine({r, g, b, a}, {dr, dg, db, da}, false) do
-    <<out(r * 255 + dr * (1 - a)), out(g * 255 + dg * (1 - a)), out(b * 255 + db * (1 - a)), da>>
+    <<out(r * 255 + dr * (1 - a)), out(g * 255 + dg * (1 - a)), out(b * 255 + db * (1 - a)),
+      out(255 - (255 - da) * (1 - a))>>
   end
 
   defp combine({r, g, b, a}, {dr, dg, db, da}, true) do

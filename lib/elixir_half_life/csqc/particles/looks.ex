@@ -247,12 +247,8 @@ defmodule ElixirHalfLife.Csqc.Particles.Looks do
   @spec classic() :: Texture.t()
   def classic do
     built(:classic, fn ->
-      for y <- 0..31,
-          x <- 0..31,
-          into: <<>>,
-          do:
-            classic_pixel(x, y)
-            |> then(&Texture.rgba(32, 32, &1))
+      for(y <- 0..31, x <- 0..31, into: <<>>, do: classic_pixel(x, y))
+      |> then(&Texture.rgba(32, 32, &1))
     end)
   end
 

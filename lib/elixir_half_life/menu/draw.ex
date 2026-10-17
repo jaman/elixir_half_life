@@ -7,6 +7,10 @@ defmodule ElixirHalfLife.Menu.Draw do
   are an eighteenth of the picture's height, at least 11 pixels; a page with more
   items than fit scrolls to keep the cursor in sight.
 
+  A picture whose alpha is below 255 (its colours already multiplied by it) has its alpha
+  raised by what the menu lays over it, as `ElixirHalfLife.Csqc.Screen` keeps it: dimming
+  lays black over it at two thirds.
+
       frame = ElixirHalfLife.Menu.Draw.over(menu, frame)
   """
 
@@ -194,7 +198,9 @@ defmodule ElixirHalfLife.Menu.Draw do
 
   defp dim(frame) do
     pixels =
-      for <<r, g, b, a <- frame.pixels>>, into: <<>>, do: <<div(r, 3), div(g, 3), div(b, 3), a>>
+      for <<r, g, b, a <- frame.pixels>>,
+        into: <<>>,
+        do: <<div(r, 3), div(g, 3), div(b, 3), 255 - div(255 - a, 3)>>
 
     %{frame | pixels: pixels}
   end
@@ -223,13 +229,52 @@ defmodule ElixirHalfLife.Menu.Draw do
 
     if width > 0,
       do:
-        Frame.blit(
+        stamp(
           frame,
           %{width: width, height: height, pixels: strip(glyphs, height, colour)},
           {x, y}
         ),
       else: frame
   end
+
+  defp stamp(frame, strip, {left, top}) do
+    rows = max(min(top + strip.height, frame.height) - max(top, 0), 0)
+    first = max(left, 0)
+    span = min(left + strip.width, frame.width) - first
+
+    if rows == 0 or span <= 0,
+      do: frame,
+      else: %{frame | pixels: stamped(frame, strip, {left, top}, first, span)}
+  end
+
+  defp stamped(frame, strip, {left, top}, first, span) do
+    row_bytes = frame.width * 4
+
+    for y <- 0..(frame.height - 1), into: <<>> do
+      row = binary_part(frame.pixels, y * row_bytes, row_bytes)
+
+      if y < top or y >= top + strip.height do
+        row
+      else
+        under = binary_part(row, first * 4, span * 4)
+        above = binary_part(strip.pixels, ((y - top) * strip.width + first - left) * 4, span * 4)
+
+        binary_part(row, 0, first * 4) <>
+          lay(under, above) <>
+          binary_part(row, (first + span) * 4, row_bytes - (first + span) * 4)
+      end
+    end
+  end
+
+  defp lay(under, above) do
+    for {<<ur, ug, ub, ua>>, <<r, g, b, a>>} <- Enum.zip(words(under), words(above)),
+        into: <<>> do
+      <<div(r * a + ur * (255 - a), 255), div(g * a + ug * (255 - a), 255),
+        div(b * a + ub * (255 - a), 255), 255 - div((255 - ua) * (255 - a), 255)>>
+    end
+  end
+
+  defp words(binary), do: for(<<word::binary-4 <- binary>>, do: word)
 
   defp strip(glyphs, height, {r, g, b}) do
     cells = Enum.map(glyphs, &cell(&1, height))

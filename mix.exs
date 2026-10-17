@@ -1,7 +1,7 @@
 defmodule ElixirHalfLife.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/jaman/elixir_half_life"
 
   def project do
@@ -40,17 +40,18 @@ defmodule ElixirHalfLife.MixProject do
 
   defp deps do
     [
-      family(:quake_c, "~> 0.2.2", "../cauldron/quake_c", []),
-      family(:quake_server, "~> 0.1.0", "../quake_server", []),
-      family(:cauldron_3d, "~> 0.2.2", "../cauldron/cauldron_3d", []),
-      family(:cauldron_3d_formats, "~> 0.2.2", "../cauldron/cauldron_3d_formats", []),
-      family(:cauldron_2d, "~> 0.2.2", "../cauldron/cauldron_2d", []),
-      family(:cauldron_2d_drafter, "~> 0.2.2", "../cauldron/cauldron_2d_drafter", []),
-      family(:linocut, "~> 0.2.2", "../cauldron/linocut", override: true),
-      family(:drafter, "~> 0.5.0", "../drafter", override: true),
-      family(:french_curve, "~> 0.2.0", "../french_curve", override: true),
-      family(:tuning_fork, "~> 0.1.12", "../tuning_fork/tuning_fork", override: true),
-      family(:tuning_fork_speaker, "~> 0.1.12", "../tuning_fork/tuning_fork_speaker", []),
+      family(:quake_c, "~> 0.3.0", "../cauldron/quake_c", []),
+      family(:quake_server, "~> 0.1.1", "../quake_server", []),
+      family(:cauldron_3d, "~> 0.3.0", "../cauldron/cauldron_3d", []),
+      family(:cauldron_3d_formats, "~> 0.3.0", "../cauldron/cauldron_3d_formats", []),
+      family(:cauldron_2d, "~> 0.3.0", "../cauldron/cauldron_2d", []),
+      family(:cauldron_2d_drafter, "~> 0.3.0", "../cauldron/cauldron_2d_drafter", []),
+      family(:cauldron_gpu, "~> 0.3.0", "../cauldron/cauldron_gpu", []),
+      family(:linocut, "~> 0.3.0", "../cauldron/linocut", override: true),
+      family(:drafter, "~> 0.5.6", "../drafter", override: true),
+      family(:french_curve, "~> 0.2.1", "../french_curve", override: true),
+      family(:tuning_fork, "~> 0.1.13", "../tuning_fork/tuning_fork", override: true),
+      family(:tuning_fork_speaker, "~> 0.1.13", "../tuning_fork/tuning_fork_speaker", []),
       family(:gamepad, "~> 0.1.0", "../gamepad", []),
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}

@@ -44,10 +44,16 @@ defmodule ElixirHalfLife.Csqc.Particles.Decals do
   The triangles of an `adddecal` mark: `shader`'s picture laid at `origin` with `up`
   (pointing out of the surface, its length the depth) and `side` (its length the size),
   each corner `{point, {s, t}, alpha}` with the alpha fading with the distance from the
-  centre along `up`.
+  centre along `up`. A mark whose `up` or `side` has no length has no triangles.
   """
   @spec project(Bsp.t(), Vec.t(), Vec.t(), Vec.t()) :: [[{Vec.t(), {float(), float()}, float()}]]
   def project(%Bsp{} = bsp, origin, up, side) do
+    if Vec.dot(up, up) == 0 or Vec.dot(side, side) == 0,
+      do: [],
+      else: laid(bsp, origin, up, side)
+  end
+
+  defp laid(bsp, origin, up, side) do
     axis0 = Vec.scale(up, -1.0)
     vradius = 1 / :math.sqrt(Vec.dot(axis0, axis0))
     radius = 1 / :math.sqrt(Vec.dot(side, side))
